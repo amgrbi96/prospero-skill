@@ -30,9 +30,6 @@ def post(data, headers):
 
 BASE_HEADERS = {
     "Content-Type": "application/json",
-    "Accept": "application/json",
-    "Origin": "https://www.crd.york.ac.uk",
-    "Referer": "https://www.crd.york.ac.uk/prospero/search",
 }
 
 BODY = {
@@ -75,12 +72,17 @@ print(json.dumps(data, indent=2)[:1500])
 check("fresh token search", status, data)
 
 print("\n" + "=" * 60)
-print("TEST 2: No auth token at all")
+print("TEST 2: Missing auth token should error")
 print("=" * 60)
 status, data = post(BODY, BASE_HEADERS)
 print(f"Status: {status}")
-print(json.dumps(data, indent=2)[:1500])
-check("no token search", status, data)
+is_error = status == 200 and isinstance(data, dict) and data.get("status") == "error"
+if is_error:
+    print(f"  PASS: correctly rejected (error: {data.get('errormessage')})")
+    passed += 1
+else:
+    print(f"  FAIL: expected error response, got data with hits")
+    failed += 1
 
 print("\n" + "=" * 60)
 print("TEST 3: download=true")

@@ -20,17 +20,30 @@ Search the PROSPERO international prospective register of systematic reviews and
 The PROSPERO search API is undocumented and was reverse-engineered from their frontend JavaScript. Read `references/api_reference.md` for the full specification including request/response formats, filter options, and authentication.
 
 Key points:
-- **Endpoint**: `POST https://www.crd.york.ac.uk/PROSPERO/api/search`
-- **Auth**: Generate a fresh `prospero-auth-token` header for each request by base64-encoding the current millisecond timestamp (`btoa(Date.now().toString())` in JS, `base64.b64encode(str(int(time.time() * 1000)))` in Python)
-- **Required headers**: `Content-Type: application/json`, `Accept: application/json`, `Origin: https://www.crd.york.ac.uk`, `Referer: https://www.crd.york.ac.uk/prospero/search`
+- **Base URL**: `https://www.crd.york.ac.uk/PROSPERO/api/` (the frontend Axios instance uses this as baseURL; all API paths are relative to it)
+- **Search endpoint**: `POST https://www.crd.york.ac.uk/PROSPERO/api/search`
+- **View endpoint**: `GET https://www.crd.york.ac.uk/PROSPERO/api/view/<CRD>`
+- **Auth**: The `prospero-auth-token` header is mandatory — the API rejects requests without it. Generate it per-request by base64-encoding the current millisecond timestamp (`btoa(Date.now().toString())` in JS, `base64.b64encode(str(int(time.time() * 1000)))` in Python). The frontend also sends `prospero-access-token` (a login session token), but this is absent for anonymous users and not needed for search.
+- **Required headers**: Only `Content-Type: application/json` and `prospero-auth-token` are required. `Accept` and `Referer` are not required (tested by removing each one against the live API). See `references/api_reference.md` for the full test matrix.
 
 ## Workflow
 
 ### Step 1: Extract search terms
 
-From the user's research question or protocol, extract the core **Population** and **Intervention** terms. Combine them as the search query, e.g. `"type 2 diabetes AND metformin"`.
+From the user's research question or protocol, extract the core **Population** and **Intervention** terms. Use field codes for precision:
 
-If the user provides specific CRD numbers or a narrow query, use those directly.
+```
+"diabetes:PA AND metformin:IV"    → 544 hits (targeted)
+"diabetes AND metformin"          → 1275 hits (broader)
+```
+
+Available field codes: `TI` (title), `PA` (population), `IV` (intervention), `CS` (condition), `OP` (outcomes), `CM` (comparator), `KW` (keywords), `AN` (CRD number), `RQ` (review question), `MS` (MeSH terms). Boolean operators (`AND`, `OR`), exact phrases (`"..."`), wildcards (`diabet*`), parentheses, and proximity operators (`NEAR`, `NEAR3`, `ADJ`) all work.
+
+**MeSH search**: Use `MeSH DESCRIPTOR <term>` for exact MeSH matching, or `MeSH DESCRIPTOR <term> EXPLODE` to include narrower MeSH terms. Example: `MeSH DESCRIPTOR Diabetes Mellitus EXPLODE` → 15,476 hits (vs 5,373 without EXPLODE).
+
+**Field code grouping**: Use parentheses to group terms before a field code: `("multiple sclerosis" OR ms):TI`.
+
+If the user provides specific CRD numbers, use the view endpoint directly (see Step 3).
 
 ### Step 2: Build and execute the search
 
@@ -53,29 +66,60 @@ Construct the API request. A minimal search looks like:
 
 | Filter name | Values | Example |
 |---|---|---|
-| `reviewstatus` | `Ongoing`, `Completed` | `[{"name": "reviewstatus", "value": ["Ongoing"]}]` |
-| `recordtype` | `Clinical` | `[{"name": "recordtype", "value": ["Clinical"]}]` |
+| `reviewstatus` | `Ongoing`, `Completed`, `Discontinued` | `[{"name": "reviewstatus", "value": ["Ongoing"]}]` |
+| `recordtype` | `Clinical`, `Animal`, `Cochrane` | `[{"name": "recordtype", "value": ["Clinical"]}]` |
 | `yearfirstpublished` | Year strings | `[{"name": "yearfirstpublished", "value": ["2024", "2025"]}]` |
-| `region` | Region names | `[{"name": "region", "value": ["Europe"]}]` |
-| `dateinprospero` | Date range string | `[{"name": "dateinprospero", "value": ["01 Jan 2024 to 01 Jan 2025"]}]` |
-| `funders` | Funder names | `[{"name": "funders", "value": ["NIH"]}]` |
+| `region` | `Europe`, `Asia`, `Africa`, `Americas`, `Oceania` | `[{"name": "region", "value": ["Europe"]}]` |
+| `funders` | Funder names (lowercase, from aggs) | `[{"name": "funders", "value": ["other"]}]` |
 
 For duplicate checking, filter to `Ongoing` reviews only — completed reviews are less concerning for registration purposes.
 
-Use `download: true` to get richer metadata (review question, authors, dates) when you need detailed comparison.
+For the first pass, 20 results is usually enough. Only paginate further if initial results show borderline overlaps.
 
 ### Step 3: Analyze results
 
-Read the response structure from `references/api_reference.md`. Key fields:
+Extract only the useful fields from the response. Strip noise (`_index`, `_id`, `_score`, `sort`, `highlight`, `_ignored`) — it adds nothing to the analysis.
 
-- `hits.total.value` — total number of matching reviews
-- `hits.hits[]._source.title` — review titles (HTML-wrapped)
-- `hits.hits[]._source.accessionnumber` — CRD number
-- `hits.hits[]._source.reviewstatus` — Ongoing / Completed
+**From the search response**, extract per hit:
+- `accessionnumber` — CRD number
+- `title` — strip HTML tags (`<p>`, `<highlight>`)
+- `reviewstatus` — Ongoing / Completed
+- `recordtype` — Clinical, Cochrane, etc.
+- `yearfirstpublished` — year
+- `recordid` — internal ID
+
+**From the aggregations** (`aggs`), extract overview stats:
+- `reviewstatus` — count of Ongoing vs Completed
+- `recordtype` — count by type
+- `yearfirstpublished` — distribution by year
+
+**For PICOS comparison**, use the view endpoint on specific records:
+```
+GET https://www.crd.york.ac.uk/PROSPERO/api/view/<accessionnumber>
+```
+The `json` field contains 14-15 blocks with `{caption, PublishedHTML}` pairs. Block structure varies by record template — search by caption across all blocks, don't hardcode block indices. Key captions:
+
+| Caption | PICOS element |
+|---|---|
+| `Population` | **P** — patient group |
+| `Intervention(s) or exposure(s)` | **I** — treatment/exposure |
+| `Comparator(s) or control(s)` | **C** — comparison |
+| `Main outcomes` | **O** — outcome measures |
+| `Study design` | **S** — design type |
+| `Condition or domain being studied` | Condition |
+| `Medical Subject Headings` | MeSH terms |
+| `Country` | Country |
+| `Stage of the review at this submission` | Review stage |
+| `Review team members` | Team |
+| `Review type` | Review methodology |
+
+The `record` field provides status metadata: `PublicationStatus`, `EditingStatus`, `TemplateVariantCaption` (review type), `IsLiving` (living systematic review flag).
+
+Only call the view endpoint for records that look like potential duplicates from the search results. Don't call it for every result.
 
 ### Step 4: Duplicate / overlap assessment
 
-For each PROSPERO result, compare against the proposed review using PICOS elements:
+Compare each PROSPERO result against the proposed review using PICOS elements (extracted from the view endpoint):
 
 | Element | What to compare |
 |---|---|
@@ -110,12 +154,18 @@ PROSPERO Search Results
 =======================
 Query: "<search terms>"
 Filters applied: [list filters]
-Total results: <count>
+Total results: <count> (Ongoing: X, Completed: Y)
 
 Potential Overlaps:
 -------------------
 1. [CRD#######] Title...
-   Status: Ongoing
+   Status: Ongoing | Type: Clinical | Year: 2025
+   Country: China | Review type: Systematic review of interventions
+   Population: [extracted population]
+   Intervention: [extracted intervention]
+   Comparator: [extracted comparator]
+   Outcomes: [extracted outcomes]
+   MeSH: [MeSH terms if available]
    PICOS Overlap: X/5
    Matched elements: [P, I, ...]
    Suggested differentiation: [specific changes]
@@ -142,7 +192,8 @@ Conclusion:
 
 - **Rate limiting**: Send one request at a time. No parallel PROSPERO queries.
 - **Max 3 refinement cycles**: After 3 rounds of differentiation attempts, ask the user explicitly before continuing.
-- **Client-side PICOS extraction**: PROSPERO records have limited metadata in standard mode. Extract PICOS from title text + available fields. Use `download: true` for borderline cases.
+- **PICOS extraction**: The search endpoint returns limited fields (title, status, record type, CRD number, year). For full PICOS data (population, intervention, comparator, outcomes, study design, country, MeSH terms, review stage), call the view endpoint (`/api/view/<CRD>`) on individual records. Only do this for records flagged as potential duplicates, not for every result.
+- **MeSH search**: Use `MeSH DESCRIPTOR <term>` syntax in the search query. The MeSH tree browser endpoint (`/api/search/meshtree`) exists but returns empty responses — use the main search API instead.
 
 ## Bundled resources
 
