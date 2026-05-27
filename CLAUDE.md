@@ -4,19 +4,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A Claude Code skill for searching the [PROSPERO](https://www.crd.york.ac.uk/prospero) international prospective register of systematic reviews and detecting duplicate/overlapping reviews before new registration. The skill uses an undocumented, reverse-engineered PROSPERO API.
+A monorepo of Claude Code skills. Each skill lives in its own directory under `skills/`.
 
 ## Repository Structure
 
-- **`SKILL.md`** — The skill definition. Contains frontmatter (name, description for trigger matching) and the full workflow instructions. This is the primary file — agents load it when the skill activates.
-- **`references/api_reference.md`** — Complete PROSPERO API specification: endpoint, auth token generation, request/response formats, filters, pagination, and a full Python example. Read before making any API changes.
-- **`scripts/test_api.py`** — Validation script that exercises the PROSPERO API with different configurations (token vs no-token, download mode, filters). No test framework — plain assertions via stdout.
+```
+skills/
+  prospero-search/       ← PROSPERO systematic review search & duplicate check
+    SKILL.md             ← Skill definition (frontmatter + workflow)
+    references/          ← API specs and supporting docs
+    scripts/             ← Validation scripts
+  <future-skill>/        ← Add new skills as siblings
+```
+
+- **`CLAUDE.md`** (this file) — repo-level development guidance, not distributed with any skill.
+- Each skill folder is self-contained and independently installable.
 
 ## Testing
 
 ```bash
-# Validate API connectivity and response parsing (hits a live server)
-python3 scripts/test_api.py
+# PROSPERO skill — validate API connectivity (hits a live server)
+python3 skills/prospero-search/scripts/test_api.py
 ```
 
 No unit test suite, no build step, no linting. The only validation is the live API test above.
@@ -28,9 +36,15 @@ No unit test suite, no build step, no linting. The only validation is the live A
 - **Rate limiting**: The API rate-limits aggressively (HTTP 429). The skill must send one request at a time with retries.
 - **`download: true`** mode only adds an `ris` (RIS citation format) field per record — not useful for PICOS extraction. Use the `/api/view/<CRD>` endpoint instead for full review content.
 
-## Modifying the Skill
+## Modifying Skills
 
-When editing `SKILL.md`, note:
+When editing any `SKILL.md`, note:
 - The frontmatter `description` field controls when the skill triggers — keep it comprehensive with synonyms and use-case phrases.
 - The workflow is linear (6 steps). Maintain this structure; agents follow it sequentially.
-- References to `references/api_reference.md` are intentional — detailed API specs live there to keep `SKILL.md` focused on workflow logic.
+- References to `references/` files are intentional — detailed specs live there to keep `SKILL.md` focused on workflow logic.
+
+## Adding a New Skill
+
+1. Create `skills/<skill-name>/SKILL.md` with frontmatter (`name`, `description`) and workflow instructions.
+2. Add supporting files (`references/`, `scripts/`) inside the skill directory.
+3. Update this `CLAUDE.md` if the new skill has testing or setup requirements.
