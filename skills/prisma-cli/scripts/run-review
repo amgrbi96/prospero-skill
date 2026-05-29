@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+# PRISMA Literature Review Pipeline runner.
+#
+# Auto-resolves pipeline location, project output paths, and systematic review defaults.
+# When not using --config-file, injects safe defaults for paths and screening settings.
+#
+# Usage:
+#   bash scripts/run-review [--project-dir DIR] [pipeline flags]
+#
+# Script-specific flags:
+#   --project-dir DIR   Set project root (default: current working directory)
+#
+# All other flags pass through to the PRISMA pipeline (main.py).
+
+set -eo pipefail
+
+# --- Constants ---
+DEFAULT_INSTALL_DIR="$HOME/.prisma-pipeline"
+
+# --- Parse script-specific flags ---
+PROJECT_DIR=""
+PIPELINE_ARGS=()
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --project-dir)
+      PROJECT_DIR="${2:?--project-dir requires a value}"
+      shift 2
+      ;;
+    --project-dir=*)
+      PROJECT_DIR="${1#*=}"
+      shift
+      ;;
+    *)
+      PIPELINE_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [ -z "$PROJECT_DIR" ]; then
+  PROJECT_DIR="$(pwd)"
+fi
+PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
+
+# --- Locate PRISMA pipeline ---
+# Resolution order:
+# 1. PRISMA_ROOT env var (explicit override)
+# 2. Default install dir (~/.prisma-pipeline/)
+# 3. Not found — print install instructions
+
+check_pipeline() {
+  [ -f "$1/main.py" ] && [ -d "$1/.venv" ]
+}
+
+if [ -n "${PRISMA_ROOT:-}" ]; then
+  if ! check_pipeline "$PRISMA_ROOT"; then
+    echo "Error: PRISMA_ROOT is set to '$PRISMA_ROOT' but the pipeline is not there." >&2
+    echo "Unset it or point it to a valid installation." >&2
+    exit 1
+  fi
+  ROOT="$PRISMA_ROOT"
+elif check_pipeline "$DEFAULT_INSTALL_DIR"; then
+  ROOT="$DEFAULT_INSTALL_DIR"
+else
+  echo "PRISMA pipeline not found. Install with:" >&2
+  echo "" >&2
+  echo "  git clone https://github.com/amgrbi96/PISMA-Literature-Review-Pipeline-Automation-Tool.git $DEFAULT_INSTALL_DIR" >&2
+  echo "  cd $DEFAULT_INSTALL_DIR" >&2
+  echo "  python3 -m venv .venv && source .venv/bin/activate" >&2
+  echo "  pip install --upgrade pip && pip install -e '.[dev,local-llm]'" >&2
+  echo "" >&2
+  echo "Or set PRISMA_ROOT to an existing installation." >&2
+  exit 1
+fi
+
+PYTHON="$ROOT/.venv/bin/python3"
+MAIN="$ROOT/main.py"
+
+if [ ! -x "$PYTHON" ]; then
+  echo "Error: Python not found at $PYTHON" >&2
+  echo "The venv may need setup. Run:" >&2
+  echo "  cd $ROOT && python3 -m venv .venv && source .venv/bin/activate && pip install -e '.[dev,local-llm]'" >&2
+  exit 1
+fi
+
+# --- Check for --config-file ---
+# When using --config-file, the user controls everything — no auto-injection.
+# Otherwise, inject both path defaults and systematic review screening defaults.
+
+has_flag() {
+  local flag="$1"
+  [ ${#PIPELINE_ARGS[@]} -eq 0 ] && return 1
+  local arg
+  for arg in "${PIPELINE_ARGS[@]}"; do
+    [ "$arg" = "$flag" ] && return 0
+    [[ "$arg" == "$flag="* ]] && return 0
+  done
+  return 1
+}
+
+if ! has_flag "--config-file"; then
+  # --- Inject path defaults ---
+  RESULTS_BASE="$PROJECT_DIR/prisma-results"
+  mkdir -p "$RESULTS_BASE/results" "$RESULTS_BASE/data" "$RESULTS_BASE/papers" "$RESULTS_BASE/logs"
+
+  if ! has_flag "--results-dir"; then
+    PIPELINE_ARGS+=(--results-dir "$RESULTS_BASE/results")
+  fi
+  if ! has_flag "--data-dir"; then
+    PIPELINE_ARGS+=(--data-dir "$RESULTS_BASE/data")
+  fi
+  if ! has_flag "--database-path"; then
+    PIPELINE_ARGS+=(--database-path "$RESULTS_BASE/data/review.db")
+  fi
+  if ! has_flag "--log-file-path"; then
+    PIPELINE_ARGS+=(--log-file-path "$RESULTS_BASE/logs/pipeline.log")
+  fi
+  if ! has_flag "--papers-dir"; then
+    PIPELINE_ARGS+=(--papers-dir "$RESULTS_BASE/papers")
+  fi
+
+  # --- Inject systematic review defaults ---
+  # These differ from the pipeline's built-in defaults to favor high recall
+  # for comprehensive medical systematic reviews.
+  # Each is only injected when NOT explicitly provided by the user.
+
+  # Screening: lower threshold, triage mode, wider maybe band
+  if ! has_flag "--threshold"; then
+    PIPELINE_ARGS+=(--threshold 55)
+  fi
+  if ! has_flag "--decision-mode"; then
+    PIPELINE_ARGS+=(--decision-mode triage)
+  fi
+  if ! has_flag "--maybe-threshold-margin"; then
+    PIPELINE_ARGS+=(--maybe-threshold-margin 15)
+  fi
+
+  # Discovery: broad strategy for maximum coverage
+  if ! has_flag "--discovery-strategy"; then
+    PIPELINE_ARGS+=(--discovery-strategy broad)
+  fi
+
+  # Sources: PubMed always on, Europe PMC on, arXiv off
+  if ! has_flag "--include-pubmed"; then
+    PIPELINE_ARGS+=(--include-pubmed)
+  fi
+  if ! has_flag "--europe-pmc-enabled"; then
+    PIPELINE_ARGS+=(--europe-pmc-enabled)
+  fi
+  if ! has_flag "--arxiv-enabled"; then
+    PIPELINE_ARGS+=(--no-arxiv-enabled)
+  fi
+
+  # Topic prefilter: lower review threshold to pass more papers through
+  if ! has_flag "--topic-prefilter-review-threshold"; then
+    PIPELINE_ARGS+=(--topic-prefilter-review-threshold 0.45)
+  fi
+
+  # MeSH expansion: enabled by default for medical reviews
+  if ! has_flag "--mesh-expansion-enabled" && ! has_flag "--no-mesh-expansion-enabled"; then
+    PIPELINE_ARGS+=(--mesh-expansion-enabled)
+  fi
+
+  # Snowballing: deeper than pipeline default for comprehensive coverage
+  if ! has_flag "--snowballing-depth"; then
+    PIPELINE_ARGS+=(--snowballing-depth 2)
+  fi
+  if ! has_flag "--snowballing-per-direction-limit"; then
+    PIPELINE_ARGS+=(--snowballing-per-direction-limit 15)
+  fi
+fi
+
+if [ ${#PIPELINE_ARGS[@]} -eq 0 ]; then
+  exec "$PYTHON" "$MAIN"
+else
+  exec "$PYTHON" "$MAIN" "${PIPELINE_ARGS[@]}"
+fi

@@ -14,7 +14,10 @@ skills/
     SKILL.md             ← Skill definition (frontmatter + workflow)
     references/          ← API specs and supporting docs
     scripts/             ← Validation scripts
-  <future-skill>/        ← Add new skills as siblings
+  prisma-cli/            ← PRISMA literature review pipeline wrapper
+    SKILL.md             ← Skill definition (frontmatter + usage guide)
+    references/          ← CLI flags, providers, config template, gap analysis
+    scripts/             ← run-review (pipeline runner)
 ```
 
 - **`CLAUDE.md`** (this file) — repo-level development guidance, not distributed with any skill.
@@ -25,16 +28,28 @@ skills/
 ```bash
 # PROSPERO skill — validate API connectivity (hits a live server)
 python3 skills/prospero-search/scripts/test_api.py
+
+# PRISMA skill — verify runner works (requires pipeline installed at ~/.prisma-pipeline)
+bash skills/prisma-cli/scripts/run-review --help
 ```
 
 No unit test suite, no build step, no linting. The only validation is the live API test above.
 
 ## Key Technical Details
 
+### prospero-search
+
 - **Auth**: PROSPERO has no API key system. Instead, generate a per-request `prospero-auth-token` header by base64-encoding the current millisecond timestamp.
 - **Filter format**: Filters use `{"name": "...", "value": [...]}` objects. The API converts them into query term modifications using hidden field codes (`rs` for reviewstatus, `rt` for recordtype, `yr` for year, `re` for region, `fi` for funders). Using the wrong key name or passing a string instead of array silently returns unfiltered results. The `dateinprospero` filter does not work at the API level.
 - **Rate limiting**: The API rate-limits aggressively (HTTP 429). The skill must send one request at a time with retries.
 - **`download: true`** mode only adds an `ris` (RIS citation format) field per record — not useful for PICOS extraction. Use the `/api/view/<CRD>` endpoint instead for full review content.
+
+### prisma-cli
+
+- **Pipeline location**: The skill wraps an external pipeline installed at `~/.prisma-pipeline/` (cloned from `amgrbi96/PISMA-Literature-Review-Pipeline-Automation-Tool`). The skill repo contains no application code.
+- **Install source**: Always clone from the fork, not upstream. The fork's master includes 19 enhancement commits (MeSH expansion, two-pass screening, source verification, etc.) that the skill documents.
+- **Path injection**: `scripts/run-review` auto-creates `prisma-results/` under the project root and injects paths + systematic review defaults. When `--config-file` is used, no defaults are injected.
+- **Config keys**: snake_case in config files, kebab-case as CLI flags. The argparse layer maps between them.
 
 ## Modifying Skills
 
